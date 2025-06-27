@@ -1,4 +1,4 @@
-from numpy import loadtxt
+import numpy as np
 import os
 
 
@@ -108,7 +108,14 @@ def showFiles(path="."):
 
 def loadDataCSV(directory, file: str):
     file_path = f"{directory}/{file}"
-    return loadtxt(file_path, usecols=(3, 4), delimiter=",")
+    try:
+        return np.loadtxt(file_path, usecols=(3, 4), delimiter=",")
+    except Exception as error:
+        pass
+    try:
+        return np.loadtxt(file_path, usecols=(0, 1), delimiter=",")
+    except Exception as error:
+        print("Špatný formát souboru.")
 
 
 def loadDataSPE(directory, file: str):
@@ -116,5 +123,19 @@ def loadDataSPE(directory, file: str):
     return []
 
 
+def splitData(data):
+    split = []
+    for i in range(0, len(data), 1340):
+        split.append(data[i : i + 1340])
+    return split
+
+
+def averageData(data):
+    pixels = data[0][0:1340]
+    intensities = np.split(data[1], len(data[1]) / 1340)
+    intensities = np.average(intensities, axis=0)
+    return np.asarray([pixels, intensities])
+
+
 def loadReferencePeaks(referencePath):
-    return loadtxt(referencePath, usecols=(0, 1))
+    return np.loadtxt(referencePath, usecols=(0, 1))

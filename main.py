@@ -6,20 +6,40 @@
 
 # %% HEADER
 print("!!! verze ALPHA: první testovací verze")
-print('Kalibrace pro mřížky 1200 a 1800 vrypů/mm. Pro soubory CSV s oddělovačem ",".')
+print(
+    'Kalibrace pro mřížky 1200 a 1800 vrypů/mm. Pro soubory CSV s oddělovačem "," a dvěmi, nebo pěti sloupci.'
+)
 print("Výstup ve formátu TXT.")
 print()
 print("INSTRUKCE:")
 print('Pro společné kalibrační spektrum pojmenovat kalibrační souboru "kalib.csv".')
 print(
-    'V případě specifických kalibračních spekter pro každé naměřené spektrum, přidat před jejich jméno "k" ("kjmeno.csv").'
+    'V případě specifických kalibračních spekter pro každé naměřené spektrum, přidat před jejich jméno "k_" ("k_jmeno.csv").'
 )
 print('Kalibrované spektra jsou uložené ve složce "CalibratedSpectra".')
 print("-" * 60)
 
 # %% IMPORT
 
-# from components.output import outputSeparateFiles, outputOneFile
+from components.userInput import (
+    loadDataCSV,
+    splitData,
+    averageData,
+    loadReferencePeaks,
+    showFiles,
+    userInputLoadAllFiles,
+    userInputLoadOneFile,
+    userInputCalibSpectrum,
+    userInputGrid,
+    userInputSaveSeparateFiles,
+    userInputRestartApp,
+)
+from components.dataProcessing import (
+    calibrateData,
+    interpolateData,
+    interpolateAxis,
+)
+from components.output import outputSeparateFiles, outputOneFile
 from numpy import asarray
 import sys
 import traceback
@@ -28,8 +48,6 @@ from os import path, makedirs
 # %% INPUT
 while True:
     try:
-        from components.userInput import userInputLoadAllFiles
-
         calibrateAllFiles = userInputLoadAllFiles()
         print()
 
@@ -39,8 +57,6 @@ while True:
         else:
             dataDirectory = "Data"
             bundleDirectory = "."
-
-        from components.userInput import showFiles
 
         availableFiles = showFiles(dataDirectory)
         availableFiles = [file for file in availableFiles if file.endswith(".csv")]
@@ -52,13 +68,9 @@ while True:
                     calibFiles.append(file)
                 else:
                     dataFiles.append(file)
-            from components.userInput import userInputCalibSpectrum
-
             oneCalibSpectrum = userInputCalibSpectrum()
             print()
         else:
-            from components.userInput import userInputLoadOneFile
-
             fileName = userInputLoadOneFile()
             print()
             dataFiles = [
@@ -74,14 +86,11 @@ while True:
             if len(calibFiles) != 0:
                 calibFiles = [calibFiles[0]]
             oneCalibSpectrum = True
-        from components.userInput import userInputGrid
 
         grid = userInputGrid()
         print()
 
         if calibrateAllFiles:
-            from components.userInput import userInputSaveSeparateFiles
-
             saveSeparateFiles = userInputSaveSeparateFiles()
             print()
         else:
@@ -89,68 +98,70 @@ while True:
 
         # %% DATA PREPARATION FOR CALIBRATION
 
+        maxLen = 0
         calibrationSpectra = []
         for calibFile in calibFiles:
-            from components.userInput import loadDataCSV
-
-            spectrum = loadDataCSV(dataDirectory, calibFile)
-            calibrationSpectra.append([calibFile.split(".")[0], spectrum.T])
+            if len(calibFile.split(".")[0]) > maxLen:
+                maxLen = len(calibFile.split(".")[0])
+            spectrum = loadDataCSV(dataDirectory, calibFile).T
+            if len(spectrum[0]) > 1340:
+                spectrum = averageData(spectrum)
+            calibrationSpectra.append([calibFile.split(".")[0], spectrum])
 
         dataSpectra = []
         for file in dataFiles:
-            spectrum = loadDataCSV(dataDirectory, file)
-            dataSpectra.append(spectrum.T[1])
-        dataSpectra = asarray(dataSpectra)
+            spectrum = loadDataCSV(dataDirectory, file).T
+            dataSpectra.append(splitData(spectrum[1]))
 
         if grid == "g1 (1200)":
-            referencePath = "referenceValues\\neonReference1200.csv"
+            referencePath = "referenceValues/neonReference1200.csv"
         else:
-            referencePath = "referenceValues\\neonReference1800.csv"
+            referencePath = "referenceValues/neonReference1800.csv"
         referencePath = path.join(bundleDirectory, referencePath)
-
-        from components.userInput import loadReferencePeaks
-
         referencePeaks = loadReferencePeaks(referencePath)
 
         # %% CALIBRATION
-
         calibratedAxes = []
-        print(f"Spektrum\tPosun\tR^2")
-        print("-" * 35)
+        print("Spektrum\t".expandtabs(8), end="")
+        print("\t".expandtabs(8) * (max(0, maxLen // 8 - 1)), end="")
+        print("Posun\tR^2".expandtabs(8))
+        print("-" * (max(2, maxLen // 8 + 1) * 8 + 16))
         for calibFile, calibrationSpectrum in calibrationSpectra:
-            from components.dataProcessing import calibrateData
-
             calibratedAxis, shift, residuals = calibrateData(
                 calibrationSpectrum, referencePeaks
             )
-            print(f"{calibFile}\t\t{shift:.2f}\t{residuals[0]:.4f}")
+            print(f"\r{calibFile}\t".expandtabs(8), end="")
+            if maxLen // 8 == 0:
+                print("\t".expandtabs(8), end="")
+            try:
+                print(f"{shift:.2f}\t{residuals[0]:.4f}".expandtabs(8), end="")
+            except:
+                print(f"{shift:.2f}\t1".expandtabs(8), end="")
             calibratedAxes.append(calibratedAxis)
+            print()
         calibratedAxes = asarray(calibratedAxes)
-        print()
 
         # %% DATA PREPARATION FOR OUTPUT
 
         finalAxes, finalSpectra = [], []
 
-        for axis, spectrum in zip(
-            calibratedAxes
-            if not oneCalibSpectrum
-            else [calibratedAxes[0]] * len(dataSpectra),
+        for axis, spectra in zip(
+            (
+                calibratedAxes
+                if not oneCalibSpectrum
+                else [calibratedAxes[0]] * len(dataSpectra)
+            ),
             dataSpectra,
         ):
-            from components.dataProcessing import interpolateData
-
-            newAxis, newSpectrum = interpolateData(axis, spectrum)
-            finalAxes.append(newAxis)
-            finalSpectra.append(newSpectrum)
+            newAxis, newSpectra = interpolateData(axis, spectra)
+            finalAxes.append(asarray(newAxis))
+            finalSpectra.append(asarray(newSpectra))
 
         if oneCalibSpectrum:
-            from components.dataProcessing import interpolateAxis
-
             finalAxes = [interpolateAxis(calibratedAxes[0])]
 
-        finalAxes = asarray(finalAxes)
-        finalSpectra = asarray(finalSpectra)
+        # finalAxes = asarray(finalAxes)
+        # finalSpectra = asarray(finalSpectra)
 
         # %% OUTPUT
 
@@ -159,19 +170,17 @@ while True:
             makedirs(folderName)
 
         if saveSeparateFiles or not oneCalibSpectrum:
-            from components.output import outputSeparateFiles
-
             outputSeparateFiles(
-                finalAxes, finalSpectra, dataFiles, folderName, oneCalibSpectrum
+                finalAxes,
+                finalSpectra,
+                dataFiles,
+                folderName,
+                oneCalibSpectrum,
             )
         else:
-            from components.output import outputOneFile
-
             outputOneFile(finalAxes, finalSpectra, folderName)
 
         # END
-        from components.userInput import userInputRestartApp
-
         restartApp = userInputRestartApp()
         if not restartApp:
             break
@@ -180,5 +189,5 @@ while True:
         traceback.print_exc()
         print(error)
         print()
-        input("Uknočit aplikaci.")
+        input("Ukončit aplikaci.")
         break

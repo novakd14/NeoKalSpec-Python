@@ -1,11 +1,14 @@
 from scipy.signal import find_peaks, savgol_filter
 from scipy.optimize import curve_fit
 from numpy.polynomial import Polynomial
-from numpy import exp, std, average, asarray, arange, mean, interp, ceil, floor
+import numpy as np
+import sys
+
+from os import path, makedirs
 
 
 def gaussian(x, a, b, c, d):
-    return a * exp(-((x - b) ** 2) / (2 * c**2)) + d
+    return a * np.exp(-((x - b) ** 2) / (2 * c**2)) + d
 
 
 def calibrateData(calibrationSpectrum, referencePeaks):
@@ -25,20 +28,22 @@ def calibrateData(calibrationSpectrum, referencePeaks):
         # Peak interval determination based on second derivation
         index = peak
         leftIndex = peak
-        while secondDerivation[index] > 0 and index > max(peak - 10, 0):
+        while index > max(peak - 10, 0) and secondDerivation[index] > 0:
             index -= 1
             leftIndex = index
 
         index = peak
         rightIndex = peak
-        while secondDerivation[index] > 0 and index < min(
-            peak + 10, len(secondDerivation)
+        while (
+            index < min(peak + 10, len(secondDerivation) - 1)
+            and secondDerivation[index] > 0
         ):
             index += 1
             rightIndex = index
 
         # Discard peaks with insufficient interval
         if rightIndex - leftIndex + 1 < 6:
+            # print(f"Skip interval\t[{peak},{intensities[peak]}]")
             continue
 
         # Control of peak intensity against backgroun noise
@@ -47,36 +52,38 @@ def calibrateData(calibrationSpectrum, referencePeaks):
 
         intervalSizeLeft = len(intensities[noiseIntervalLeft])
         if intervalSizeLeft > 5:
-            averageLeft = average(intensities[noiseIntervalLeft])
-            sigmaLeft = std(intensities[noiseIntervalLeft], ddof=1)
+            averageLeft = np.average(intensities[noiseIntervalLeft])
+            sigmaLeft = np.std(intensities[noiseIntervalLeft], ddof=1)
 
         intervalSizeRight = len(intensities[noiseIntervalRight])
         if intervalSizeRight > 5:
-            averageRight = average(intensities[noiseIntervalRight])
-            sigmaRight = std(intensities[noiseIntervalRight], ddof=1)
+            averageRight = np.average(intensities[noiseIntervalRight])
+            sigmaRight = np.std(intensities[noiseIntervalRight], ddof=1)
 
         if intervalSizeLeft <= 5:
-            averageTotal = averageRight
+            average = averageRight
             sigma = sigmaRight
         elif intervalSizeRight <= 5:
-            averageTotal = averageLeft
+            average = averageLeft
             sigma = sigmaLeft
         elif averageLeft < averageRight:
-            averageTotal = averageLeft
+            average = averageLeft
             sigma = sigmaLeft
         else:
-            averageTotal = averageRight
+            average = averageRight
             sigma = sigmaRight
 
         # Discard peaks with insufficient intensity
-        if (intensities[peak] - averageTotal) / sigma < 5:
+        if (intensities[peak] - average) / sigma < 5:
+            # print(f"Skip intensity\t[{peak},{intensities[peak]}]")
             continue
 
-        # Initial parameters fro fit of peak
+        # Initial parameters for fit of peak
         backgroundInterval = slice(
             max(peak - 30, min(pixels)), min(peak + 30, max(pixels))
         )
         background = min(intensities[backgroundInterval])
+        # print(f"Indexes\t\t[{rightIndex},{leftIndex}]")
         initialParameters = [
             intensities[peak] - background,  # intensity
             pixels[peak],  # position
@@ -95,32 +102,41 @@ def calibrateData(calibrationSpectrum, referencePeaks):
             )
         except:
             # Discard the peak if fit fails
+            # print(f"Skip fit fail\t[{peak},{intensities[peak]}]")
             continue
 
         # Discard the peak if its position falls out of the original interval
         if (fit[1] < pixels[leftIndex] or fit[1] > pixels[rightIndex]) or (
             fit[2] < 1 or fit[2] > 8
         ):
+            # print(f"Skip pos out\t[{peak},{intensities[peak]}]")
             continue
 
         newPeak.append(fit[1])
         newPeak.append(fit[0] + fit[3] - background)
         newPeaks.append(newPeak)
-    newPeaks = asarray(newPeaks)
+    newPeaks = np.asarray(newPeaks)
 
     # Assigning of wavenumbers to peaks
-    minShift = referencePeaks[0][0] - newPeaks[0][0] - 100
-    maxShift = referencePeaks[-1][0] - newPeaks[-1][0] + 100
+    minShift = referencePeaks[0][0] - newPeaks[-1][0] - 100
+    # print(f"{minShift=}\n")
+    maxShift = referencePeaks[-1][0] - newPeaks[0][0] + 100
+    # print(f"{maxShift=}\n")
 
     maxAgreement = -1
-    for shift in arange(minShift, maxShift + 0.5, 0.5):
+    agreementGraph = []
+    for shift in np.arange(minShift, maxShift + 0.5, 0.5):
+        progress = (shift - minShift) * 100 / (maxShift - minShift)
+        sys.stdout.write("\r" + " " * 8)
+        sys.stdout.write(f"\r{int(progress)}/100%")
+        sys.stdout.flush()
         nearestPeaks = []
         agreement = 0
         lastWeight = 1
         for peak, _ in newPeaks:
             minDistance = -1  # ještě zkusit najít lepší způsob!!!
             for referencePeak, referenceWavelength in referencePeaks:
-                distance = abs(peak + shift - referencePeak)
+                distance = np.abs(peak + shift - referencePeak)
                 if distance < minDistance or minDistance == -1:
                     minDistance = distance
                     nearestPeak = [peak, referenceWavelength, distance]
@@ -130,6 +146,8 @@ def calibrateData(calibrationSpectrum, referencePeaks):
                     lastWeight = weight
                     nearestPeaks.append(nearestPeak)
                     break
+        agreementGraph.append([shift, agreement])
+
         if agreement > maxAgreement or maxAgreement == -1:
             maxAgreement = agreement
             bestShiftValues = {
@@ -137,19 +155,45 @@ def calibrateData(calibrationSpectrum, referencePeaks):
                 "agreement": agreement,
                 "assignedPeaks": nearestPeaks,
             }
+    agreementGraph = np.asarray(agreementGraph)
+
+    # Save log with agreement values (for CONTROL)
+    # print(f"{agreementGraph=}")
+    # if not path.exists("log"):
+    #     makedirs("log")
+    # with open(f"log/agreement.log", "w") as outputFile:
+    #     for shift, agreement in agreementGraph:
+    #         outputFile.write(f"{shift}")
+    #         outputFile.write(f" {agreement}")
+    #         outputFile.write(f"\n")
 
     # Duplicate wavenumber assignment check
     assignedPeaks = bestShiftValues["assignedPeaks"]
     i = 0
     while i < len(assignedPeaks) - 1:
-        if assignedPeaks[i][1] == assignedPeaks[i + 1][1]:
+        if assignedPeaks[i][2] > 20:
+            del assignedPeaks[i]
+            # print(f"Deleted dist {assignedPeaks[i]}")
+        elif assignedPeaks[i][1] == assignedPeaks[i + 1][1]:
             if assignedPeaks[i][2] <= assignedPeaks[i + 1][2]:
                 del assignedPeaks[i + 1]
+                # print(f"Deleted dupe {assignedPeaks[i]}")
             else:
                 del assignedPeaks[i]
+                # print(f"Deleted dupe {assignedPeaks[i]}")
         else:
             i += 1
-    pixelPeaks, assignedPeaks, _ = asarray(assignedPeaks).T
+    if assignedPeaks[i][2] > 20:
+        del assignedPeaks[i]
+        # print(f"Deleted dist {assignedPeaks[i]}")
+    pixelPeaks, assignedPeaks, _ = np.asarray(assignedPeaks).T
+
+    # Save log with assigned peaks (for CONTROL)
+    # with open(f"log/assignment.log", "w") as outputFile:
+    #     for pixel, peak in zip(pixelPeaks, assignedPeaks):
+    #         outputFile.write(f"{pixel}")
+    #         outputFile.write(f" {peak}")
+    #         outputFile.write(f"\n")
 
     # Fit of assigned wavenumbers by a polynomyial
     calibFunction, [residuals, _, _, _] = Polynomial.fit(
@@ -158,24 +202,27 @@ def calibrateData(calibrationSpectrum, referencePeaks):
     calibratedAxis = calibFunction(axis)
 
     # Goodness of fit
-    totalSumSquares = ((assignedPeaks - mean(assignedPeaks)) ** 2).sum()
+    totalSumSquares = ((assignedPeaks - np.mean(assignedPeaks)) ** 2).sum()
     rSquared = 1 - residuals / totalSumSquares
+    # print(f"{calibFunction=}")
 
     # RETURN
+    sys.stdout.write("\r" + " " * 8)
     return (calibratedAxis, bestShiftValues["shift"], rSquared)
 
 
-def interpolateData(axis, spectrum):
+def interpolateData(axis, spectra):
     newAxis = interpolateAxis(axis)
-    newSpectrum = interp(newAxis, axis, spectrum)
-
-    return [newAxis, newSpectrum]
+    newSpectra = []
+    for spectrum in spectra:
+        newSpectra.append(np.interp(newAxis, axis, spectrum))
+    return [newAxis, newSpectra]
 
 
 def interpolateAxis(axis):
-    newAxisMin = ceil(axis[0])
-    newAxisMax = floor(axis[-1])
-    newAxis = arange(newAxisMin, newAxisMax + 1, 1)
+    newAxisMin = np.ceil(axis[0])
+    newAxisMax = np.floor(axis[-1])
+    newAxis = np.arange(newAxisMin, newAxisMax + 1, 1)
 
     return newAxis
 
